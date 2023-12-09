@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+
+/*
+Контракт позволяет создать договор между Магазином и Производителем.
+
+Суть работы со стороны пользователя:
+Обе стороны регистрируются в сервисе. 
+Магазин создает договор и прописывает в него условия поставки по каждому интересующему его продукту.
+Производитель получает договор и одобряет его.
+
+Суть работы со стороны разработчика:
+Мы регистрируем пользователя как Person (и он заносится в массив person_mass) в нем прописывается пользователем себе роль Producer/Shop.
+Информация о пользователе добавляется в соответствующий массив producer_mass/shop_mass.
+Происходит авторизация autorizateMe, где проверяется по массивам существует ли подобный пользователь.
+Создается продукт addProduct и добавляется информация о нем + генерируется уникальный артикул article.
+Магазин генерирует базис неактивного договора createAgreement. 
+Магазин прописывает условия по каждому товару suggestTerms. Прописывая артикул договора article и артикул товара article_product , по которому требуется поставка.
+Далее договор и условия отправляются непосредственно производителю.
+Производитель подтверждает договор agreeAgreement, автоматически вносится его имя в партнерство partners_mass с данным магазином и меняется статус договора на "активный".
+При необходимости договор можно обнулить nonagreeAgreement.
+*/
+
+contract Agreement {
+
+    uint num_agreements=0;
+    uint num_products=0;
+    mapping(address=>Person) person_mass;//Массив пользователей
+    mapping(address=>Producer) producer_mass;//Массив производителей
+    mapping(address=>Shop) shop_mass;//Массив магазинов
+    mapping(uint=>Product) products_mass;//Массив продуктов
+    mapping(uint=>Partners) partners_mass;//Массив существующих партнерств между магазином и производителем
+    mapping(uint=>mapping(uint=>Terms)) terms_mass;//Все условия договоров по кажому товару. Артикул договора - Артикул товара - Информация об условиях поставки по товару
+
+    //Пользователь с любой ролью
+    struct Person{
+        string login;//логин для входа
+        string password;//пароль для входа
+        string name;//Имя пользователя
+        string role;//Роль (Производитель, Магазин, Поставщик, Покупатель)
+    }
+    //Производитель товара
+    struct Producer{
+        string name;//Название предприятия
+        string adress;//Адрес предприятия
+    }
+    //Магазин, который закупает продукты у производителья
+    struct Shop{
+        string name;//Название бренда
+        string adress;//Адресс магазина
+    }
+
+    //Партнеры Производитель+Магазин
+    struct Partners{
+        string producer;//Производитель
+        string shop;//Магазин
+        uint article_term;//Артикул договора о партнерстве
+        bool is_active;//Активен ли договор
+    }
+    
+    //Продукт и информация о нем
+    struct Product {
+        uint article_product;//Артикул продукта
+        string name;//Наименование продукта
+        string producer;//Производитель продукта
+        uint price;//Цена продукта
+        uint expiration_date; //Срок годности в днях
+        
+    }
+    
+    //Условие договора на определенный товар
+    struct Terms{
+        uint article;//Артикул договора, для которого созданы условия
+        uint article_product;//Артикул продукта, на который условия распространяются
+        uint agreement_date;//Дата подписания договора
+        Product product;//Сам продукт
+        uint number_days_delivery;//Переодичность поставки в днях
+        uint number_product_delivery;//Количество продукта при одной поставке
+    }
+    
+
+
+    address public admin;
+    constructor(){
+        admin = msg.sender;
+    }
+
+    //Добавляем пользователя в баззу данных
+    function addPerson(address _id, string memory _login, string memory _password, string memory _name, string memory _role) public{
+        person_mass[_id].login=_login;
+        person_mass[_id].password=_password;
+        person_mass[_id].name=_name;
+        person_mass[_id].role=_role;
+        //Сразу же создаем ячейки в массивы Производителя/Магазина относительно прописанной роли
+        if(sha256(abi.encodePacked(_role))==sha256(abi.encodePacked("Shop"))){
+            addShop(_id,_name,"some address");
+        }else if(sha256(abi.encodePacked(_role))==sha256(abi.encodePacked("Producer"))){
+            addProducer(_id,_name,"some address");
+        }
+    }
+
+    //Авторизация пользователя и проверка присутствия в БД пользователей
+    function autorizateMe(address _id, string memory _login, string memory _password) public view returns (bool){
+        string memory log = person_mass[_id].login;
+        string memory pass = person_mass[_id].password;
+        if(bytes(log).length==bytes(_login).length){
+            if(sha256(abi.encodePacked(log))==sha256(abi.encodePacked(_login))){
+                if(bytes(pass).length==bytes(_password).length){
+                    if(sha256(abi.encodePacked(pass))==sha256(abi.encodePacked(_password))){
+                        return true;
+                    }
+                }else{
+                return false;
+                }
+            }
+        }else{
+            return false;
+        }
+        return false;
+    }
+
+    //Добавляем Производтеля в массив
+    function addProducer(address _id, string memory _name, string memory _adress) public {
+        require(_id != address(0), "Empty adress");
+        producer_mass[_id].name = _name;
+        producer_mass[_id].adress = _adress;
+    }
+    //Добавляем Магазин в массив
+    function addShop(address _id, string memory _name, string memory _adress) public {
+        require(_id != address(0), "Empty adress");
+        shop_mass[_id].name = _name;
+        shop_mass[_id].adress = _adress;
+    }
+
+    //Создаем продукт и добавляем в массив продуктов
+    function addProduct(string memory _name,string memory _producer, uint _price,uint _day) public {
+        //Генерируем уникальный артикул для продукта
+        uint artic = num_products+1;
+        num_products++;
+        
+        //Заносим информацию о продукте
+        products_mass[artic].article_product=artic;
+        products_mass[artic].name=_name;
+        products_mass[artic].producer=_producer;
+        products_mass[artic].price=_price;
+        products_mass[artic].expiration_date=_day; 
+
+    }
+
+    //СОздаем базовую часть неактивного договора без условия для дальнейшей работы с ним
+    function createAgreement(address _id) public returns (uint){
+        //Генерируем уникальный артикул договора
+        uint artic = num_agreements+1;
+        num_agreements++;
+        
+        //Вносим только сам артикул и название магазина предлагающего договор
+        partners_mass[artic].article_term=artic;
+        partners_mass[artic].shop=shop_mass[_id].name;
+        return artic;
+    }
+
+    //Генератор рандомного числа (Требуется для артикула)
+    function random(uint length) public view returns (uint) {
+        uint rand_num = uint(keccak256(abi.encodePacked(block.difficulty, block.timestamp)));
+        return rand_num % length;
+    } 
+
+    //Предложение условий на один продукт
+    function suggestTerms(address _id, uint _article, uint _article_product, uint _date, uint _numdays, uint _numprod) public {
+        require(_id != address(0), "Empty adress");
+        terms_mass[_article][_article_product].article=_article;//Добавляем артикул договора
+        terms_mass[_article][_article_product].article_product=_article_product;
+        terms_mass[_article][_article_product].agreement_date=_date;
+        terms_mass[_article][_article_product].product=products_mass[_article_product];
+        //Добавляем дополнительно поле с переодичностью поставки и количеством товара
+        terms_mass[_article][_article_product].number_days_delivery=_numdays;
+        terms_mass[_article][_article_product].number_product_delivery=_numprod;
+    }
+    
+    //Подтверждение договора производителем
+    function agreeAgreement(address _id, uint _article) public returns (string memory){
+        partners_mass[_article].producer=producer_mass[_id].name;
+        partners_mass[_article].is_active=true;
+        return "Now agreement is activated";
+    }
+    //Обнуление договора производителем
+    function nonagreeAgreement(uint _article) public returns (string memory){
+        partners_mass[_article].producer="";
+        partners_mass[_article].is_active=false;
+        return "Now agreement is deactivated";
+    }
+
+}
